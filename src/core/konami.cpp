@@ -13,6 +13,18 @@
 #include <limits>
 #include <stdio.h>
 
+// ---- 573 EARLY-BOOT trace (debug) ----------------------------------------------------------
+// Logs every 573-device access with the CPU PC, to locate where boot diverges before SCSI on
+// the MiSTer port (which reaches flash but never SCSI). Writes konami_trace.log; capped.
+static std::FILE* s_ktrace = nullptr;
+static unsigned   s_kt_n = 0;
+static bool       s_kt_first_scsi = true;
+static bool       s_kt_first_flash = true;
+#define KT(...) do { if (s_ktrace && s_kt_n < 400000u) { ++s_kt_n; std::fprintf(s_ktrace, __VA_ARGS__); std::fflush(s_ktrace); } } while (0)
+#define KTDEV_R(tag) KT(tag " pc=%08X off=%02X\n", CPU::g_state.current_instruction_pc, (unsigned)(Offset & 0x1F))
+#define KTDEV_W(tag) KT(tag " pc=%08X off=%02X val=%02X\n", CPU::g_state.current_instruction_pc, (unsigned)(Offset & 0x1F), (unsigned)(Value & 0xFF))
+// -------------------------------------------------------------------------------------------
+
 Log_SetChannel(Konami);
 
 // SCSI
@@ -113,6 +125,9 @@ static void AssertScsiInterrupt(void)
 
 void KonamiInit(void)
 {
+  s_ktrace = std::fopen(g_host_interface->GetUserDirectoryRelativePath("konami_trace.log").c_str(), "w");
+  Log_InfoPrintf("[573 trace] konami_trace.log opened=%d", s_ktrace ? 1 : 0);
+  s_kt_n = 0; s_kt_first_scsi = true; s_kt_first_flash = true;
   const std::string eeprom_path = g_host_interface->GetStringSettingValue("KonamiGV", "EEPROMPath", "");
   const std::string flash0_path = g_host_interface->GetStringSettingValue("KonamiGV", "FlashPath0", "");
   const std::string flash1_path = g_host_interface->GetStringSettingValue("KonamiGV", "FlashPath1", "");
@@ -198,6 +213,8 @@ void KonamiDmaControlWrite(u32& ControlBits, u32& Address, u32 Value)
 
 void KonamiScsiRead(u32 Size, u32 Offset, u32& Value)
 {
+  if (s_kt_first_scsi) { s_kt_first_scsi = false; KT("=== FIRST SCSI ACCESS (boot reached SCSI) pc=%08X ===\n", CPU::g_state.current_instruction_pc); }
+  KTDEV_R("[SCSI-R]");
   const u8 Register = (Offset & 0x1F) >> 1;
 
   Value = ScsiRegs[Register];
@@ -215,6 +232,8 @@ void KonamiScsiRead(u32 Size, u32 Offset, u32& Value)
 
 void KonamiScsiWrite(u32 Size, u32 Offset, u32 Value)
 {
+  if (s_kt_first_scsi) { s_kt_first_scsi = false; KT("=== FIRST SCSI ACCESS (boot reached SCSI) pc=%08X ===\n", CPU::g_state.current_instruction_pc); }
+  KTDEV_W("[SCSI-W]");
   const u8 Register = (Offset & 0x1F) >> 1;
 
   switch (Register)
@@ -322,6 +341,7 @@ void KonamiScsiWrite(u32 Size, u32 Offset, u32 Value)
 
 void KonamiP1Read(u32 Size, u32 Offset, u32& Value)
 {
+  KTDEV_R("[P1-R]");
   Value = 0xFFFFFFFF;
   if (CurrentButtons & 0x0080) Value &= ~(1 << 0); // LEFT
   if (CurrentButtons & 0x0020) Value &= ~(1 << 1); // RIGHT
@@ -364,6 +384,8 @@ void KonamiFlashRead(u32 Size, u32 Offset, u32& Value)
     case 0:
       Chip = (FlashAddress >= 0x200000) ? 2 : 0;
       Value = Flash[Chip][FlashAddress & 0x1FFFFF] | (Flash[Chip + 1][FlashAddress & 0x1FFFFF] << 8);
+      if (s_kt_first_flash) { s_kt_first_flash = false; KT("=== FIRST FLASH READ pc=%08X ===\n", CPU::g_state.current_instruction_pc); }
+      KT("[FLASH-R] pc=%08X fa=%06X data=%04X\n", CPU::g_state.current_instruction_pc, (unsigned)FlashAddress, (unsigned)Value);
       FlashAddress++;
       break;
     case 8:
@@ -377,6 +399,7 @@ void KonamiFlashRead(u32 Size, u32 Offset, u32& Value)
 
 void KonamiFlashWrite(u32 Size, u32 Offset, u32 Value)
 {
+  KTDEV_W("[FLASH-W]");
   Offset &= 0xF;
 
   switch (Offset)
@@ -403,6 +426,7 @@ void KonamiFlashWrite(u32 Size, u32 Offset, u32 Value)
 
 void KonamiEepromRead(u32 Size, u32 Offset, u32& Value)
 {
+  KTDEV_R("[EEPROM-R]");
   if (Offset >= 0x00180080 && Offset < 0x00180100)
   {
     Value = Eeprom[((Offset - 0x80) & 0x7F) >> 1];
@@ -416,6 +440,7 @@ void KonamiEepromRead(u32 Size, u32 Offset, u32& Value)
 
 void KonamiEepromWrite(u32 Size, u32 Offset, u32 Value)
 {
+  KTDEV_W("[EEPROM-W]");
   if (Offset >= 0x00180080 && Offset < 0x00180100)
   {
     u8 RelativeOffset = (Offset - 0x80) & 0x7F;
@@ -432,6 +457,7 @@ void KonamiEepromWrite(u32 Size, u32 Offset, u32 Value)
 // Trackball
 void KonamiTrackballRead(u32 Size, u32 Offset, u32& Value)
 {
+  KTDEV_R("[TRACKBALL-R]");
   if (Offset == 0x006800C0)
   {
     // Sample mouse delta on first register read each cycle
