@@ -15,6 +15,22 @@
 
 Log_SetChannel(Konami);
 
+// ===== SCSI-only trace (branch trace-scsi-cdb): captures the game's post-load disc
+// commands that the earlier 400k-line trace missed (it capped during the flash flood).
+// No FLASH/P1/TRACKBALL logging. Written to konami_scsi_trace.log in the working dir.
+static FILE* STrace;
+static u32 STraceLines;
+#define STRACE(...)                                                                                                    \
+  do                                                                                                                   \
+  {                                                                                                                    \
+    if (STrace && STraceLines < 2000000)                                                                               \
+    {                                                                                                                  \
+      fprintf(STrace, __VA_ARGS__);                                                                                    \
+      fflush(STrace);                                                                                                  \
+      STraceLines++;                                                                                                   \
+    }                                                                                                                  \
+  } while (0)
+
 // SCSI
 enum {
   REG_XFERCNTLOW = 0, // read = current xfer count lo byte, write = set xfer count lo byte
@@ -127,6 +143,10 @@ void KonamiInit(void)
 
   ScsiCd = FileSystem::OpenCFile(System::GetRunningPath().c_str(), "rb");
 
+  STrace = fopen("konami_scsi_trace.log", "w");
+  STraceLines = 0;
+  STRACE("[TRACE] scsi-only trace opened=%d\n", STrace != nullptr);
+
   TrackballMouseX = g_host_interface->GetDisplay()->GetMousePositionX();
   TrackballMouseY = g_host_interface->GetDisplay()->GetMousePositionY();
   TrackballSensitivity = g_host_interface->GetFloatSettingValue("KonamiGV", "TrackballSensitivity", 1.0f);
@@ -159,6 +179,7 @@ void KonamiDmaControlWrite(u32& ControlBits, u32& Address, u32 Value)
         memset(Ram + Address, 0, 28);
         break;
       case 0x28:
+        STRACE("[DMA28] addr=%08X readsize=%u lba=%u\n", Address, (u32)ReadSize, ScsiSectorLba);
         while (ReadSize >= 2048)
         {
           std::fseek(ScsiCd, ScsiSectorLba * 2048, SEEK_SET);
@@ -166,7 +187,7 @@ void KonamiDmaControlWrite(u32& ControlBits, u32& Address, u32 Value)
           ret = fread(Sector, 1, 2048, ScsiCd);
           if (ret != 2048)
           {
-            // Log_WarningPrintf("Error reading sector! ret=%08X", ret);
+            STRACE("[DMA28] SHORT READ lba=%u ret=%d (completing anyway)\n", ScsiSectorLba - 1, ret);
           }
           memcpy(Ram + Address, Sector, ret);
           Address += 2048;
@@ -233,6 +254,7 @@ void KonamiScsiWrite(u32 Size, u32 Offset, u32 Value)
       break;
     case REG_COMMAND:
       ScsiFifoPtr = 0;
+      STRACE("[CMD] pc=%08X val=%02X\n", CPU::g_state.current_instruction_pc, (u8)Value);
 
       switch (Value & 0x7F)
       {
@@ -249,6 +271,13 @@ void KonamiScsiWrite(u32 Size, u32 Offset, u32 Value)
           AssertScsiInterrupt();
           break;
         case 0x42:
+          STRACE("[CDB] pc=%08X fifo=%02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X op=%02X lba=%u "
+                 "len=%u\n",
+                 CPU::g_state.current_instruction_pc, ScsiFifo[0], ScsiFifo[1], ScsiFifo[2], ScsiFifo[3], ScsiFifo[4],
+                 ScsiFifo[5], ScsiFifo[6], ScsiFifo[7], ScsiFifo[8], ScsiFifo[9], ScsiFifo[10], ScsiFifo[11],
+                 ScsiFifo[12], ScsiFifo[1],
+                 (u32)((ScsiFifo[3] << 24) | (ScsiFifo[4] << 16) | (ScsiFifo[5] << 8) | ScsiFifo[6]),
+                 (u32)((ScsiFifo[8] << 8) | ScsiFifo[9]));
           if (ScsiFifo[1] == 0 || ScsiFifo[1] == 0x48 || ScsiFifo[1] == 0x4B)
           {
             ScsiRegs[REG_INTSTATE] = 0x06;
